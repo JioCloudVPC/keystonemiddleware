@@ -179,6 +179,8 @@ keystone.token_auth
 import binascii
 import datetime
 import logging
+import json
+import requests
 
 from keystoneclient import access
 from keystoneclient import adapter
@@ -238,6 +240,12 @@ _OPTS = [
                # or (depending on client support) an unversioned, publicly
                # accessible identity endpoint (see bug 1207517)
                help='Complete public Identity API endpoint.'),
+    cfg.StrOpt('auth_token_path',
+               default='/v3/auth/tokens',
+               help='Token Validation Path'),
+    cfg.BoolOpt('iam_authorization',
+                default=True,
+                help='Authorization with IAM'),
     cfg.StrOpt('auth_version',
                default=None,
                help='API version of the admin Identity API endpoint.'),
@@ -498,43 +506,60 @@ class AuthProtocol(object):
         self._conf = _conf_values_type_convert(conf)
         self._app = app
 
-        # delay_auth_decision means we still allow unauthenticated requests
-        # through and we let the downstream service make the final decision
-        self._delay_auth_decision = self._conf_get('delay_auth_decision')
-        self._include_service_catalog = self._conf_get(
-            'include_service_catalog')
+        self._iam_authorization = self._conf_get('iam_authorization')
 
-        self._identity_server = self._create_identity_server()
+        if False == self._iam_authorization:
+            # delay_auth_decision means we still allow unauthenticated requests
+            # through and we let the downstream service make the final decision
+            self._delay_auth_decision = self._conf_get('delay_auth_decision')
+            self._include_service_catalog = self._conf_get(
+                'include_service_catalog')
 
-        self._auth_uri = self._conf_get('auth_uri')
-        if not self._auth_uri:
-            self._LOG.warning(
-                _LW('Configuring auth_uri to point to the public identity '
-                    'endpoint is required; clients may not be able to '
-                    'authenticate against an admin endpoint'))
+            self._identity_server = self._create_identity_server()
 
-            # FIXME(dolph): drop support for this fallback behavior as
-            # documented in bug 1207517.
+            self._auth_uri = self._conf_get('auth_uri')
+            if not self._auth_uri:
+                self._LOG.warning(
+                    _LW('Configuring auth_uri to point to the public identity '
+                        'endpoint is required; clients may not be able to '
+                        'authenticate against an admin endpoint'))
 
-            self._auth_uri = self._identity_server.auth_uri
+                # FIXME(dolph): drop support for this fallback behavior as
+                # documented in bug 1207517.
 
-        self._signing_directory = _signing_dir.SigningDirectory(
-            directory_name=self._conf_get('signing_dir'), log=self._LOG)
+                self._auth_uri = self._identity_server.auth_uri
 
-        self._token_cache = self._token_cache_factory()
+            self._signing_directory = _signing_dir.SigningDirectory(
+                directory_name=self._conf_get('signing_dir'), log=self._LOG)
 
-        revocation_cache_timeout = datetime.timedelta(
-            seconds=self._conf_get('revocation_cache_time'))
-        self._revocations = _revocations.Revocations(revocation_cache_timeout,
-                                                     self._signing_directory,
-                                                     self._identity_server,
-                                                     self._cms_verify,
-                                                     self._LOG)
+            self._token_cache = self._token_cache_factory()
 
-        self._check_revocations_for_cached = self._conf_get(
-            'check_revocations_for_cached')
-        self._init_auth_headers()
+            revocation_cache_timeout = datetime.timedelta(
+                seconds=self._conf_get('revocation_cache_time'))
+            self._revocations = _revocations.Revocations(revocation_cache_timeout,
+                                                         self._signing_directory,
+                                                         self._identity_server,
+                                                         self._cms_verify,
+                                                         self._LOG)
 
+            self._check_revocations_for_cached = self._conf_get(
+                'check_revocations_for_cached')
+            self._init_auth_headers()
+        else:
+            self._auth_uri = self._conf_get('auth_uri')
+            if not self._auth_uri:
+                self._LOG.warning(
+                     _LW('Configuring auth_uri to point to the public identity '
+                         'endpoint is required; clients may not be able to '
+                         'authenticate against an IAM endpoint'))
+
+            self._auth_token_path = self._conf_get('auth_token_path')
+            if not self._auth_token_path:
+                self._LOG.warning(
+                     _LW('Configuring auth_token_path to point to the public identity '
+                         'endpoint is required; clients may not be able to '
+                         'authenticate against an IAM endpoint'))
+ 
     def _conf_get(self, name, group=_base.AUTHTOKEN_GROUP):
         # try config from paste-deploy first
         if name in self._conf:
@@ -571,70 +596,105 @@ class AuthProtocol(object):
                        env.get('HTTP_X_SERVICE_ROLES')))
             return msg
 
-        self._token_cache.initialize(env)
-        self._remove_auth_headers(env)
+        if False == self._iam_authorization:
+            self._token_cache.initialize(env)
+            self._remove_auth_headers(env)
 
-        try:
-            user_auth_ref = None
-            serv_auth_ref = None
+            try:
+                user_auth_ref = None
+                serv_auth_ref = None
+
+                try:
+                    self._LOG.debug('Authenticating user token')
+                    user_token = self._get_user_token_from_header(env)
+                    user_token_info = self._validate_token(user_token, env)
+                    user_auth_ref = access.AccessInfo.factory(
+                        body=user_token_info,
+                        auth_token=user_token)
+                    env['keystone.token_info'] = user_token_info
+                    user_headers = self._build_user_headers(user_auth_ref,
+                                                        user_token_info)
+                    self._add_headers(env, user_headers)
+                except exc.InvalidToken:
+                    if self._delay_auth_decision:
+                        self._LOG.info(
+                            _LI('Invalid user token - deferring reject '
+                                'downstream'))
+                        self._add_headers(env, {'X-Identity-Status': 'Invalid'})
+                    else:
+                        self._LOG.info(
+                            _LI('Invalid user token - rejecting request'))
+                        return self._reject_request(env, start_response)
+
+                try:
+                    self._LOG.debug('Authenticating service token')
+                    serv_token = self._get_service_token_from_header(env)
+                    if serv_token is not None:
+                        serv_token_info = self._validate_token(
+                            serv_token, env)
+                        serv_auth_ref = access.AccessInfo.factory(
+                            body=serv_token_info,
+                            auth_token=serv_token)
+                        serv_headers = self._build_service_headers(serv_token_info)
+                        self._add_headers(env, serv_headers)
+                except exc.InvalidToken:
+                    if self._delay_auth_decision:
+                        self._LOG.info(
+                            _LI('Invalid service token - deferring reject '
+                                'downstream'))
+                        self._add_headers(env,
+                                      {'X-Service-Identity-Status': 'Invalid'})
+                    else:
+                        self._LOG.info(
+                            _LI('Invalid service token - rejecting request'))
+                        return self._reject_request(env, start_response)
+
+                env['keystone.token_auth'] = _user_plugin.UserAuthPlugin(
+                    user_auth_ref, serv_auth_ref)
+
+            except exc.ServiceError as e:
+                self._LOG.critical(_LC('Unable to obtain admin token: %s'), e)
+                return self._do_503_error(env, start_response)
+            except exc._InternalServiceError:
+                return self._do_500_error(env, start_response)
+
+            self._LOG.debug("Received request from %s", _fmt_msg(env))
+
+            return self._call_app(env, start_response)
+
+        else:
+            url = self._auth_uri + self._auth_token_path
 
             try:
                 self._LOG.debug('Authenticating user token')
                 user_token = self._get_user_token_from_header(env)
-                user_token_info = self._validate_token(user_token, env)
-                user_auth_ref = access.AccessInfo.factory(
-                    body=user_token_info,
-                    auth_token=user_token)
-                env['keystone.token_info'] = user_token_info
-                user_headers = self._build_user_headers(user_auth_ref,
-                                                        user_token_info)
-                self._add_headers(env, user_headers)
             except exc.InvalidToken:
-                if self._delay_auth_decision:
-                    self._LOG.info(
-                        _LI('Invalid user token - deferring reject '
-                            'downstream'))
-                    self._add_headers(env, {'X-Identity-Status': 'Invalid'})
-                else:
-                    self._LOG.info(
-                        _LI('Invalid user token - rejecting request'))
-                    return self._reject_request(env, start_response)
+                self._LOG.info(_LI('Invalid user token - rejecting request'))
+                return self._reject_request(env, start_response)
+
+            headers = {'X-Auth-Token' : user_token}
+
+            response = requests.get(url, headers=headers)
+
+            status_code = response.status_code
+            if status_code != 200:
+                msg = response.reason
+                return self._reject_request(env, start_response)
+
+            result = response.json()
 
             try:
-                self._LOG.debug('Authenticating service token')
-                serv_token = self._get_service_token_from_header(env)
-                if serv_token is not None:
-                    serv_token_info = self._validate_token(
-                        serv_token, env)
-                    serv_auth_ref = access.AccessInfo.factory(
-                        body=serv_token_info,
-                        auth_token=serv_token)
-                    serv_headers = self._build_service_headers(serv_token_info)
-                    self._add_headers(env, serv_headers)
-            except exc.InvalidToken:
-                if self._delay_auth_decision:
-                    self._LOG.info(
-                        _LI('Invalid service token - deferring reject '
-                            'downstream'))
-                    self._add_headers(env,
-                                      {'X-Service-Identity-Status': 'Invalid'})
-                else:
-                    self._LOG.info(
-                        _LI('Invalid service token - rejecting request'))
-                    return self._reject_request(env, start_response)
+                if 'user_id' in result and 'account_id' in result:
+                    env_key = self._header_to_env_var('X_USER_ID')
+                    env[env_key] = result['user_id']
 
-            env['keystone.token_auth'] = _user_plugin.UserAuthPlugin(
-                user_auth_ref, serv_auth_ref)
+                    env_key = self._header_to_env_var('X_PROJECT_ID')
+                    env[env_key] = result['account_id']
 
-        except exc.ServiceError as e:
-            self._LOG.critical(_LC('Unable to obtain admin token: %s'), e)
-            return self._do_503_error(env, start_response)
-        except exc._InternalServiceError:
-            return self._do_500_error(env, start_response)
-
-        self._LOG.debug("Received request from %s", _fmt_msg(env))
-
-        return self._call_app(env, start_response)
+                    return self._app(env, start_response)
+            except (AttributeError, KeyError):
+                self._LOG.critical(_LC('No user_id and account_id from IAM'))
+                return self._reject_request(env, start_response)
 
     def _do_500_error(self, env, start_response):
         resp = _utils.MiniResp('Service unavailable', env)
