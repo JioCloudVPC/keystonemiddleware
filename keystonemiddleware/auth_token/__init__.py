@@ -241,7 +241,7 @@ _OPTS = [
                # accessible identity endpoint (see bug 1207517)
                help='Complete public Identity API endpoint.'),
     cfg.StrOpt('auth_token_path',
-               default='/v3/auth/tokens',
+               default='/auth/tokens',
                help='Token Validation Path'),
     cfg.BoolOpt('iam_authorization',
                 default=True,
