@@ -678,8 +678,10 @@ class AuthProtocol(object):
 
             status_code = response.status_code
             if status_code != 200:
-                msg = response.reason
-                return self._reject_request(env, start_response)
+                self._LOG.info(_LI('Token Validation URL Failed - rejecting request'))
+                return self._reject_request_with_error(env,
+                                                       response, 
+                                                       start_response)
 
             result = response.json()
 
@@ -754,8 +756,6 @@ class AuthProtocol(object):
         if token:
             return token
         else:
-            if not self._delay_auth_decision:
-                self._LOG.debug('Headers: %s', env)
             raise exc.InvalidToken(_('Unable to find token in headers'))
 
     def _get_service_token_from_header(self, env):
@@ -783,6 +783,29 @@ class AuthProtocol(object):
         resp = _utils.MiniResp('Authentication required',
                                env, self._reject_auth_headers)
         start_response('401 Unauthorized', resp.headers)
+        return resp.body
+
+    def _reject_request_with_error(self, env, response, start_response):
+        """Redirect client to auth server.
+
+        :param env: wsgi request environment
+        :param start_response: wsgi response callback
+        :param response: response from server
+        :returns: HTTPUnauthorized http response
+
+        """
+        resp = _utils.MiniResp('Token Validation URL Failed',
+                               env, self._reject_auth_headers)
+
+        status_code = response.status_code
+
+        if 400 == status_code:
+            start_response('400 Bad Request', resp.headers)
+        elif 401 == status_code:
+            start_response('401 Unauthorized', resp.headers)
+        elif 404 == status_code:
+            start_response('404 NotFound', resp.headers)
+
         return resp.body
 
     def _validate_token(self, token, env, retry=True):
