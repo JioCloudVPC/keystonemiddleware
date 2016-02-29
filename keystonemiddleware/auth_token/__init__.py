@@ -241,7 +241,7 @@ _OPTS = [
                # accessible identity endpoint (see bug 1207517)
                help='Complete public Identity API endpoint.'),
     cfg.StrOpt('auth_token_path',
-               default='/auth/tokens',
+               default='/token-auth',
                help='Token Validation Path'),
     cfg.BoolOpt('iam_authorization',
                 default=True,
@@ -663,7 +663,7 @@ class AuthProtocol(object):
             return self._call_app(env, start_response)
 
         else:
-            url = self._auth_uri + self._auth_token_path
+            iam_url = self._auth_uri + self._auth_token_path
 
             try:
                 self._LOG.debug('Authenticating user token')
@@ -673,8 +673,11 @@ class AuthProtocol(object):
                 return self._reject_request(env, start_response)
 
             headers = {'X-Auth-Token' : user_token}
+            data = {}
+            data['action_resource_list'] = []
 
-            response = requests.get(url, headers=headers)
+            response = requests.request('POST', iam_url, verify=True,
+                                        data=data, headers=headers)
 
             status_code = response.status_code
             if status_code != 200:
