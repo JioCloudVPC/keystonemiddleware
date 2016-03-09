@@ -688,8 +688,8 @@ class AuthProtocol(object):
 
             try:
                 result = response.json()
-            except json.JSONDecodeError:
-                self._LOG.critical(_LC('JSON Decode error after succesful authenication - rejecting request'))
+            except Exception:
+                self._LOG.critical(_LC('JSON Decode error after succesful authentication - rejecting request'))
                 self._LOG.critical(_LC(str(response.headers)))
                 self._LOG.critical(_LC(str(response._content)))
                 return self._reject_request_with_error(env,
