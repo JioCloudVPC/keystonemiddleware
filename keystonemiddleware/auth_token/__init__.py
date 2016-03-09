@@ -686,7 +686,15 @@ class AuthProtocol(object):
                                                        response, 
                                                        start_response)
 
-            result = response.json()
+            try:
+                result = response.json()
+            except Exception:
+                self._LOG.critical(_LC('JSON Decode error after succesful authentication - rejecting request'))
+                self._LOG.critical(_LC(str(response.headers)))
+                self._LOG.critical(_LC(str(response._content)))
+                return self._reject_request_with_error(env,
+                                                       response, 
+                                                       start_response)
 
             try:
                 if 'user_id' in result and 'account_id' in result:
@@ -807,6 +815,8 @@ class AuthProtocol(object):
         elif 401 == status_code:
             start_response('401 Unauthorized', resp.headers)
         elif 404 == status_code:
+            start_response('404 NotFound', resp.headers)
+        elif 200 == status_code:
             start_response('404 NotFound', resp.headers)
 
         return resp.body
