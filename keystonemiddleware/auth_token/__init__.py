@@ -681,7 +681,10 @@ class AuthProtocol(object):
 
             status_code = response.status_code
             if status_code != 200:
-                self._LOG.info(_LI('Token Validation URL Failed - rejecting request'))
+                self._LOG.critical(_LC('Token Validation URL Failed - rejecting request'))
+                self._LOG.critical(_LC('Received response status code - '+str(status_code)))
+                self._LOG.critical(_LC(str(response.headers)))
+                self._LOG.critical(_LC(str(response._content)))
                 return self._reject_request_with_error(env,
                                                        response, 
                                                        start_response)
