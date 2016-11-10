@@ -672,7 +672,13 @@ class AuthProtocol(object):
                 self._LOG.info(_LI('Invalid user token - rejecting request'))
                 return self._reject_request(env, start_response)
 
-            headers = {'X-Auth-Token' : user_token}
+            client_ip = self._get_client_ip(env)
+            request_id = self._get_request_id_from_header(env)
+            self._LOG.warn(_LW('Client IP of request:{request_id} is {client_ip}'.\
+                                format(request_id=request_id, client_ip=client_ip)))
+            headers = {'X-Auth-Token': user_token}
+            if client_ip:
+                headers['X-Forwarded-For'] = client_ip
             data = {}
             data['action_resource_list'] = []
 
@@ -771,6 +777,14 @@ class AuthProtocol(object):
             return token
         else:
             raise exc.InvalidToken(_('Unable to find token in headers'))
+
+    def _get_client_ip(self, env):
+        ips = self._get_header(env, 'X-Forwarded-For')
+        if ips:
+            return ips.split(',')[0]
+
+    def _get_request_id_from_header(self, env):
+        return env.get('openstack.request_id')
 
     def _get_service_token_from_header(self, env):
         """Get service token id from request.
