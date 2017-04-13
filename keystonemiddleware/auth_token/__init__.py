@@ -708,7 +708,7 @@ class AuthProtocol(object):
 
 
 
-            env_key = self._header_to_env_var('X_PAAS_ACCOUNT'
+            env_key = self._header_to_env_var('X_PAAS_ACCOUNT')
             if 'PaaS_account' in result :
                 env[env_key] = result['PaaS_account']
             else:
