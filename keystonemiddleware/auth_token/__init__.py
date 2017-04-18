@@ -709,10 +709,10 @@ class AuthProtocol(object):
 
 
             env_key = self._header_to_env_var('X_PAAS_ACCOUNT')
-            if 'PaaS_account' in result :
-                env[env_key] = result['PaaS_account']
+            if 'PaaS' in result :
+                env[env_key] = result['PaaS']
             else:
-                env[env_key] = 'false'
+                env[env_key] = False
 
             try:
                 if 'user_id' in result and 'account_id' in result:
